@@ -1,13 +1,12 @@
 // --- FIREBASE INIT ---
 const firebaseConfig = {
-    apiKey: "AIzaSyAa8z5vUMSP8hY7ULARjeGRVzvlVMz9HSk",
-    authDomain: "database-d2671.firebaseapp.com",
-    databaseURL: "https://database-d2671-default-rtdb.firebaseio.com",
-    projectId: "database-d2671",
-    storageBucket: "database-d2671.firebasestorage.app",
-    messagingSenderId: "556803189291",
-    appId: "1:556803189291:web:03b042e8f6005e9ade986e",
-    measurementId: "G-LDCH4W4YQ0"
+    apiKey: "AIzaSyDUwWbFcU0IUivzp_MevyD9jOPRRRnrrJA",
+    authDomain: "kiit-events.firebaseapp.com",
+    databaseURL: "https://kiit-events-default-rtdb.firebaseio.com",
+    projectId: "kiit-events",
+    storageBucket: "kiit-events.firebasestorage.app",
+    messagingSenderId: "90796391324",
+    appId: "1:90796391324:web:7aca456732eb24fd46a659"
 };
 
 // Initialize Firebase if not already initialized
@@ -2328,7 +2327,7 @@ const Views = {
                                 <!-- Card 2: Max Participants -->
                                 <div class="bg-white/5 p-5 rounded-2xl border border-white/5 hover:bg-white/10 transition-colors">
                                     <div class="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-2">Max Participants</div>
-                                    <div class="text-white font-semibold text-lg">${ev.max || 'Unlimited'}</div>
+                                    <div class="text-white font-semibold text-lg">${(parseInt(ev.max, 10) > 0) ? ev.max : 'Unlimited'}</div>
                                 </div>
 
                                 <!-- Card 3: Event Mode -->
