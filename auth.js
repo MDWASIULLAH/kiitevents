@@ -117,83 +117,54 @@ document.getElementById("authForm").addEventListener("submit", e => {
     // --- STEP 2: CREDENTIAL VALIDATION ---
 
     if (selectedRole === 'Admin') {
-        // A. HARDCODED MASTER SUPER ADMINS (Legacy/Emergency Access)
-        if (SUPER_ADMINS.includes(email)) {
-            const validKey = ADMIN_ACCESS_KEYS[email] || 'admin123';
-            if (password !== validKey) {
-                alert("Invalid Access Key for Master Admin.");
-                return;
-            }
+        const authBtn = document.querySelector('.btn');
+        const originalText = authBtn.innerHTML;
+        authBtn.disabled = true;
+        authBtn.innerHTML = "Verifying...";
 
-            const adminUser = {
-                name: "Super Admin",
-                email: email,
-                role: 'Admin',
-                type: 'SUPERUSER',
-                permissions: ['ALL'],
-                joined: new Date().toISOString()
-            };
-            loginSuccess(adminUser);
-            return;
-        }
-
-        // B. FIRESTORE DATABASE CHECK (New Flow)
-        try {
-            // We need to fetch from Firestore
-            // Note: Since this is inside a sync event listener, we should ideally make the listener async
-            // But let's use the Promise syntax or checking if we can switch the handler to async.
-            // The constraint is replacing this block. 
-            // I will use a self-invoking async function logic or better, assume I can use await if I change the parent function.
-            // Wait, I cannot change the parent function signature easily with just this block replacement if it's not async.
-            // Let's check the view_file of auth.js again.
-            // The listener is `document.getElementById("authForm").addEventListener("submit", e => { ...`
-            // It is NOT async. 
-            // I should assume I can't use await directly here.
-            // I will implement the Firestore check using .then() chains or simple promise handling.
-
-            // Actually, better to just make the DB call.
-
-            db.collection('admins').doc(email).get().then(doc => {
-                if (doc.exists) {
-                    const data = doc.data();
-
-                    // Verify Password (Direct String Compare as per rqmt/implementation)
-                    if (data.password === password) {
-                        // Success!
-                        if (data.status === 'Blocked') {
-                            alert("Your account has been blocked.");
-                            return;
-                        }
-
-                        const adminUser = {
-                            name: data.name,
-                            email: data.email,
-                            role: 'Admin',
-                            type: data.type || 'LIMITED',
-                            permissions: data.permissions || [],
-                            joined: data.joined
-                        };
-                        loginSuccess(adminUser);
-                    } else {
-                        alert("Invalid Password / Access Key.");
-                    }
+        // 1. Try Secure Backend Login first
+        const loginAdminFn = firebase.functions().httpsCallable('loginAdmin');
+        loginAdminFn({ email, password })
+            .then(result => {
+                if (result.data.success) {
+                    loginSuccess(result.data.user);
                 } else {
-                    // Not found in DB -> Check LocalStorage (Legacy Fallback)
-                    checkLocalStorageAdmin(email, password);
+                    alert("Authentication failed.");
                 }
-            }).catch(error => {
-                console.error("Login DB Error:", error);
-                // Fallback to local storage on error?
-                checkLocalStorageAdmin(email, password);
+            })
+            .catch(error => {
+                console.warn("Backend login failed, checking hardcoded/local backups:", error);
+
+                // 2. HARDCODED MASTER SUPER ADMINS (Emergency Access)
+                if (SUPER_ADMINS.includes(email)) {
+                    const validKey = ADMIN_ACCESS_KEYS[email] || 'admin123';
+                    if (password === validKey) {
+                        loginSuccess({
+                            name: "Super Admin",
+                            email: email,
+                            role: 'Admin',
+                            type: 'SUPERUSER',
+                            permissions: ['ALL'],
+                            joined: new Date().toISOString()
+                        });
+                        return;
+                    }
+                }
+
+                // 3. Check LocalStorage (Legacy Fallback)
+                const users = JSON.parse(localStorage.getItem('users')) || [];
+                const adminUser = users.find(u => u.email === email && u.role === 'Admin');
+                if (adminUser && adminUser.password === password) {
+                    loginSuccess(adminUser);
+                } else {
+                    alert(`Login Failed: ${error.message || 'Invalid credentials or connection error'}`);
+                }
+            })
+            .finally(() => {
+                authBtn.disabled = false;
+                authBtn.innerHTML = originalText;
             });
-
-            return; // Return here to let the Promise handle the rest
-
-        } catch (e) {
-            console.error(e);
-            checkLocalStorageAdmin(email, password); // Fallback
-            return;
-        }
+        return;
     }
 
     // Helper for Legacy LocalStorage Check (Moved strictly for fallback)
@@ -266,14 +237,13 @@ function loginSuccess(user) {
 
 // TODO: User must replace these with their own Firebase Config keys from console.firebase.google.com
 const firebaseConfig = {
-    apiKey: "AIzaSyAa8z5vUMSP8hY7ULARjeGRVzvlVMz9HSk",
-    authDomain: "database-d2671.firebaseapp.com",
-    databaseURL: "https://database-d2671-default-rtdb.firebaseio.com",
-    projectId: "database-d2671",
-    storageBucket: "database-d2671.firebasestorage.app",
-    messagingSenderId: "556803189291",
-    appId: "1:556803189291:web:03b042e8f6005e9ade986e",
-    measurementId: "G-LDCH4W4YQ0"
+    apiKey: "AIzaSyDUwWbFcU0IUivzp_MevyD9jOPRRRnrrJA",
+    authDomain: "kiit-events.firebaseapp.com",
+    databaseURL: "https://kiit-events-default-rtdb.firebaseio.com",
+    projectId: "kiit-events",
+    storageBucket: "kiit-events.firebasestorage.app",
+    messagingSenderId: "90796391324",
+    appId: "1:90796391324:web:7aca456732eb24fd46a659"
 };
 
 // Initialize Firebase
