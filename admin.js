@@ -71,14 +71,13 @@ localStorage.setItem('users', JSON.stringify(users));
 if (typeof firebase !== 'undefined') {
     if (!firebase.apps.length) {
         const firebaseConfig = {
-            apiKey: "AIzaSyAa8z5vUMSP8hY7ULARjeGRVzvlVMz9HSk",
-            authDomain: "database-d2671.firebaseapp.com",
-            databaseURL: "https://database-d2671-default-rtdb.firebaseio.com",
-            projectId: "database-d2671",
-            storageBucket: "database-d2671.firebasestorage.app",
-            messagingSenderId: "556803189291",
-            appId: "1:556803189291:web:03b042e8f6005e9ade986e",
-            measurementId: "G-LDCH4W4YQ0"
+            apiKey: "AIzaSyDUwWbFcU0IUivzp_MevyD9jOPRRRnrrJA",
+            authDomain: "kiit-events.firebaseapp.com",
+            databaseURL: "https://kiit-events-default-rtdb.firebaseio.com",
+            projectId: "kiit-events",
+            storageBucket: "kiit-events.firebasestorage.app",
+            messagingSenderId: "90796391324",
+            appId: "1:90796391324:web:7aca456732eb24fd46a659"
         };
         firebase.initializeApp(firebaseConfig);
     }
