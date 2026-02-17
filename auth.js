@@ -1,29 +1,12 @@
 // --- AUTHENTICATION LOGIC ---
 
 // 1. CONSTANTS & CONFIG
-const SUPER_ADMINS = ['mdwasiullah445@gmail.com', 'aarush480hkb@gmail.com'];
+// SUPER_ADMINS removed - strictly role-based now
 const STUDENT_EMAIL_REGEX = /^[0-9]{8}@kiit\.ac\.in$/;
 const KIIT_EMAIL_REGEX = /@kiit\.ac\.in$/;
 
-// Simple Hash Function for Simulation (In real app, use bcrypt on backend)
-const hashPassword = (str) => {
-    let hash = 0, i, chr;
-    if (str.length === 0) return hash;
-    for (i = 0; i < str.length; i++) {
-        chr = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + chr;
-        hash |= 0; // Convert to 32bit integer
-    }
-    return hash.toString();
-};
-
-// Pre-stored Admin Credentials (Hashed)
-// 'admin123' -> '1450575459' (Example hash)
-// For simplicity in this demo, we will check against plain text in code but simulate hash comparison logic
-const ADMIN_ACCESS_KEYS = {
-    'mdwasiullah445@gmail.com': 'admin123', // Master Key
-    'aarush480hkb@gmail.com': 'admin123'
-};
+// REMOVED: Insecure Hash & Hardcoded Keys
+// Authentication is now handled 100% by Firebase Auth.
 
 let isSignup = false;
 let selectedRole = "Student"; // Default role
@@ -122,48 +105,28 @@ document.getElementById("authForm").addEventListener("submit", e => {
         authBtn.disabled = true;
         authBtn.innerHTML = "Verifying...";
 
-        // 1. Try Secure Backend Login first
-        const loginAdminFn = firebase.functions().httpsCallable('loginAdmin');
-        loginAdminFn({ email, password })
-            .then(result => {
-                if (result.data.success) {
-                    loginSuccess(result.data.user);
-                } else {
-                    alert("Authentication failed.");
-                }
+        // 1. Secure Firebase Auth Login
+        firebase.auth().signInWithEmailAndPassword(email, password)
+            .then((userCredential) => {
+                // Success! The state listener in init() or admin.js will handle the rest? 
+                // Actually auth.js handles redirect in loginSuccess.
+                // We need to fetch the profile or just trust the auth?
+                // Visual feedback is good.
+                loginSuccess({
+                    name: userCredential.user.displayName || email.split('@')[0],
+                    email: email,
+                    role: 'Admin', // Provisional, admin.js will verify claim
+                    uid: userCredential.user.uid
+                    // We don't set 'permissions' here blindly anymore.
+                });
             })
-            .catch(error => {
-                console.warn("Backend login failed, checking hardcoded/local backups:", error);
-
-                // 2. HARDCODED MASTER SUPER ADMINS (Emergency Access)
-                if (SUPER_ADMINS.includes(email)) {
-                    const validKey = ADMIN_ACCESS_KEYS[email] || 'admin123';
-                    if (password === validKey) {
-                        loginSuccess({
-                            name: "Super Admin",
-                            email: email,
-                            role: 'Admin',
-                            type: 'SUPERUSER',
-                            permissions: ['ALL'],
-                            joined: new Date().toISOString()
-                        });
-                        return;
-                    }
-                }
-
-                // 3. Check LocalStorage (Legacy Fallback)
-                const users = JSON.parse(localStorage.getItem('users')) || [];
-                const adminUser = users.find(u => u.email === email && u.role === 'Admin');
-                if (adminUser && adminUser.password === password) {
-                    loginSuccess(adminUser);
-                } else {
-                    alert(`Login Failed: ${error.message || 'Invalid credentials or connection error'}`);
-                }
-            })
-            .finally(() => {
+            .catch((error) => {
+                console.error("Login Error:", error);
+                alert(`Authentication Failed: ${error.message}`);
                 authBtn.disabled = false;
                 authBtn.innerHTML = originalText;
             });
+        return;
         return;
     }
 
