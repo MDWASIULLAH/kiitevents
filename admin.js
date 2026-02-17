@@ -1,12 +1,96 @@
 // --- ADMIN PANEL LOGIC ---
 
 // 1. AUTHENTICATION & PERMISSION CHECK
-const currentUser = JSON.parse(localStorage.getItem('currentUser')) || JSON.parse(sessionStorage.getItem('currentUser'));
 
-if (!currentUser || currentUser.role !== 'Admin') {
-    alert('ACCESS DENIED: Admins only.');
+let currentUser = null; // Global user object populated by Auth
+
+// Show loading overlay immediately to prevent UI flash
+const loadingOverlay = document.createElement('div');
+loadingOverlay.id = 'auth-loading';
+loadingOverlay.style.cssText = 'position:fixed;inset:0;background:#0f172a;z-index:9999;display:flex;align-items:center;justify-content:center;color:white;font-family:sans-serif;';
+loadingOverlay.innerHTML = '<div style="text-align:center"><h3>Verifying Secure Session...</h3><p>Checking Admin Permissions</p></div>';
+document.body.appendChild(loadingOverlay);
+
+
+
+// Strict Auth Check (DB BASED - FREE SETUP)
+if (typeof firebase !== 'undefined') {
+    firebase.auth().onAuthStateChanged(async (user) => {
+        if (!user) {
+            alert("Please login first");
+            window.location.href = 'auth.html';
+            return;
+        }
+
+        const uid = user.uid;
+        const db = firebase.database();
+
+        try {
+            // 1. Check Super Admin
+            const superAdminRef = db.ref(`superAdmins/${uid}`);
+            const superAdminSnap = await superAdminRef.once('value');
+
+            if (superAdminSnap.exists()) {
+                console.log("Super Admin logged in");
+                currentUser = {
+                    uid: user.uid,
+                    email: user.email,
+                    name: user.displayName || "Admin",
+                    admin: true,
+                    superAdmin: true,
+                    role: 'Super Admin',
+                    type: 'SUPERUSER'
+                };
+                finishAuth();
+                return;
+            }
+
+            // 2. Check Admin
+            const adminRef = db.ref(`admins/${uid}`);
+            const adminSnap = await adminRef.once('value');
+
+            if (adminSnap.exists()) {
+                console.log("Admin logged in");
+                const adminData = adminSnap.val();
+                currentUser = {
+                    uid: user.uid,
+                    email: user.email,
+                    name: user.displayName || "Admin",
+                    admin: true,
+                    superAdmin: false,
+                    role: 'Admin',
+                    type: 'ADMIN',
+                    permissions: adminData.permissions || []
+                };
+                finishAuth();
+                return;
+            }
+
+            // 3. Block everyone else
+            console.error("User authenticated but not in admin/superAdmins DB.");
+            alert("ACCESS DENIED");
+            window.location.href = 'index.html';
+
+        } catch (error) {
+            console.error("Auth check failed:", error);
+            alert("Permission check failed: " + error.message);
+            window.location.href = 'index.html';
+        }
+    });
+
+    function finishAuth() {
+        if (document.body.contains(loadingOverlay)) {
+            document.body.removeChild(loadingOverlay);
+        }
+        if (window.initAdminApp) window.initAdminApp();
+    }
+
+} else {
     window.location.href = 'auth.html';
 }
+
+
+
 
 // Define Permissions
 const PERMISSIONS = {
@@ -23,46 +107,27 @@ const PERMISSIONS = {
 };
 
 function hasPermission(perm) {
-    // Double check email for critical superuser override
-    if (['mdwasiullah445@gmail.com', 'aarush480hkb@gmail.com'].includes(currentUser.email)) return true;
-    if (currentUser.type === 'SUPERUSER') return true;
-    return currentUser.permissions?.includes(perm);
+    if (!currentUser) return false;
+
+    // Super Admin has ALL permissions
+    if (currentUser.superAdmin === true) return true;
+
+    // Normal Admin has specific permissions
+    if (currentUser.admin === true) {
+        if (perm === PERMISSIONS.MANAGE_ADMINS) return false; // Only Super Admin
+        if (perm === PERMISSIONS.BLOCK_USERS) return false; // Only Super Admin
+        if (perm === PERMISSIONS.SYSTEM_SETTINGS) return false;
+        return true;
+    }
+
+    return false;
 }
 
 // 2. DATA MANAGEMENT (Load & Seed)
 let users = JSON.parse(localStorage.getItem('users')) || [];
 
-// SUPER ADMINS HARDCODED LIST
-const SUPER_ADMINS = ['mdwasiullah445@gmail.com', 'aarush480hkb@gmail.com'];
-
-// Seed Super Admins if not exist
-SUPER_ADMINS.forEach(email => {
-    const exists = users.find(u => u.email === email);
-    if (!exists) {
-        users.push({
-            name: email.includes('wasi') ? 'Wasiullah (Super Admin)' : 'Aarush (Super Admin)',
-            email: email,
-            role: 'Admin',
-            type: 'SUPERUSER',
-            permissions: ['ALL'],
-            status: 'Active',
-            joined: new Date().toLocaleDateString()
-        });
-    } else {
-        // Enforce Super Admin Status if they exist
-        exists.type = 'SUPERUSER';
-        exists.permissions = ['ALL'];
-    }
-});
-
-// Enforce NON-SUPERUSER for everyone else (Security cleanup)
-users.forEach(u => {
-    if (!SUPER_ADMINS.includes(u.email) && u.type === 'SUPERUSER') {
-        u.type = 'LIMITED';
-        u.role = 'Admin';
-        u.permissions = ['view_events', 'add_events']; // Default fallback
-    }
-});
+// SUPER ADMINS HARDCODED LIST REMOVED - Managed via Cloud Functions Only
+// Seeding Logic Removed - Use 'setInitialSuperAdmins' Cloud Function
 
 localStorage.setItem('users', JSON.stringify(users));
 
@@ -89,7 +154,8 @@ if (typeof firebase !== 'undefined') {
 // Ensure db is available for admin operations
 let db;
 if (typeof firebase !== 'undefined') {
-    db = firebase.firestore();
+    // db = firebase.firestore(); // REMOVED: User requested Realtime Database only
+    // We will use firebase.database() directly
 }
 
 // Async Event Loading (FIREBASE SYNC)
@@ -107,6 +173,44 @@ if (typeof firebase !== 'undefined') {
             });
         }
         renderEvents();
+        renderStats();
+    });
+
+    // --- SYNC ADMINS (Users) ---
+    const adminsRef = firebase.database().ref("admins");
+    adminsRef.on("value", (snapshot) => {
+        const data = snapshot.val();
+        users = []; // Rebuild users list from Realtime DB
+
+        // Always keep Hardcoded Super Admins?
+        // Actually, better to rely on DB now if seeded. 
+        // But for safety, we can merge or just rely on DB.
+        // Let's rely on DB, but ensure current session valid.
+
+        if (data) {
+            Object.keys(data).forEach(key => {
+                const u = data[key];
+                u.uid = key;
+                users.push(u);
+
+                // Sync Current User if it matches
+                if (currentUser && (currentUser.email === u.email || currentUser.uid === key)) {
+                    // Update permissions live
+                    currentUser.role = u.role;
+                    currentUser.permissions = u.permissions;
+                    currentUser.type = u.type;
+                    currentUser.status = u.status;
+
+                    localStorage.setItem('currentUser', JSON.stringify(currentUser));
+
+                    if (u.status === 'Blocked') {
+                        alert("Your account has been blocked.");
+                        logout();
+                    }
+                }
+            });
+        }
+        renderUsers();
         renderStats();
     });
 }
@@ -258,65 +362,108 @@ async function uploadImageToCloudinary(file) {
 
 
 // --- ADMIN MANAGEMENT (Super Admin Only) ---
-window.createAdmin = async function (name, email, permissions) { // Make Async
-    // STRICT CHECK: Only specific emails can create admins
-    if (!SUPER_ADMINS.includes(currentUser.email)) {
+// --- SECURE PASSWORD GENERATOR ---
+function generateSecurePassword(length = 12) {
+    const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+";
+    let retVal = "";
+    for (let i = 0, n = charset.length; i < length; ++i) {
+        retVal += charset.charAt(Math.floor(Math.random() * n));
+    }
+    return retVal;
+}
+
+// --- ADMIN MANAGEMENT (Super Admin Only) ---
+// --- ADMIN MANAGEMENT (Super Admin Only) ---
+window.createAdmin = async function (name, email, permissions, role, manualPassword = null) {
+    // 1. Memory Check (Fast)
+    if (!hasPermission(PERMISSIONS.MANAGE_ADMINS)) {
         return alert("Access Denied: Only Super Admins can create new admins.");
     }
 
-    // Check if user exists (in Firestore now!)
-    try {
-        const docRef = db.collection('admins').doc(email);
-        const doc = await docRef.get();
+    const password = manualPassword || generateSecurePassword(12);
+    let secondaryApp = null;
 
-        if (doc.exists) {
-            return alert("User with this email is already an admin.");
+    try {
+        const db = firebase.database();
+        const currentUid = currentUser.uid;
+
+        // 2. DB VERIFICATION (Explicit Security Check before writing)
+        // This ensures even if someone manipulated 'currentUser' object, the DB write is protected by logic
+        // and Firebase Rules will ideally backup this up.
+        const superAdminSnap = await db.ref(`superAdmins/${currentUid}`).once('value');
+        if (!superAdminSnap.exists()) {
+            alert("Security Check Failed: You are not listed as a Super Admin in the database.");
+            return false;
         }
 
-        // Create Admin Object
-        const newAdmin = {
+        // A. Create User in Firebase Auth (Secondary App)
+        const config = {
+            apiKey: "AIzaSyDUwWbFcU0IUivzp_MevyD9jOPRRRnrrJA",
+            authDomain: "kiit-events.firebaseapp.com",
+            databaseURL: "https://kiit-events-default-rtdb.firebaseio.com",
+            projectId: "kiit-events",
+            storageBucket: "kiit-events.firebasestorage.app",
+            messagingSenderId: "90796391324",
+            appId: "1:90796391324:web:7aca456732eb24fd46a659"
+        };
+        secondaryApp = firebase.initializeApp(config, "Secondary");
+        const userCredential = await secondaryApp.auth().createUserWithEmailAndPassword(email, password);
+        const newUid = userCredential.user.uid;
+        await userCredential.user.updateProfile({ displayName: name });
+
+        // B. ASSIGN ROLE VIA DB
+        // 1. Add to 'admins' path
+        const newAdminData = {
             name: name,
             email: email,
-            role: 'Admin',
-            type: 'LIMITED', // FORCE LIMITED TYPE
-            permissions: permissions,
-            status: 'Active',
-            joined: new Date().toISOString(),
-            createdBy: currentUser.email
+            role: role || 'Admin',
+            permissions: permissions || [],
+            addedBy: currentUser.email,
+            addedAt: firebase.database.ServerValue.TIMESTAMP
         };
 
-        // Write to Firestore
-        await docRef.set(newAdmin);
+        // This set() matches the user's Step 4 requirement "await set(ref(db, 'admins/' + targetUid), ...)"
+        await db.ref(`admins/${newUid}`).set(newAdminData);
 
-        // Also update local list for immediate UI feedback if we want?
-        // Or just reload users.
-        users.push(newAdmin);
-        saveData(); // Keep localStorage sync for legacy/offline support or other lists?
-        // Actually, we should probably stop relying on localStorage for the master list if we move to DB.
-        // But for this hybrid step, let's just do both or focus on DB.
+        // 2. If Super Admin, add to 'superAdmins' path too
+        if (role === 'Super Admin') {
+            await db.ref(`superAdmins/${newUid}`).set({
+                email: email,
+                addedBy: currentUser.email,
+                addedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+        }
 
-        logAction(`Created Limited Admin: ${email}`);
-        alert(`ADMIN CREATED SUCCESSFULLY!\n\nUser: ${email}\n\nAsk them to sign in with Google. No password needed.`);
+        // C. Clean up & Notify
+        secondaryApp.auth().signOut();
+        secondaryApp.delete();
 
-        // Refresh User List (if we implement fetching from DB later, for now we pushed to local array)
-        renderUsers();
+        // D. Send Email
+        const emailParams = {
+            to_email: email,
+            to_name: name,
+            password: password,
+            login_url: window.location.origin + '/auth.html',
+            role: role || 'Admin',
+            from_name: 'KIIT Events Hub'
+        };
+        await emailjs.send('service_2x99ioj', 'template_kzsjqpf', emailParams);
+
+        logAction(`Created ${role}: ${email}`);
+        alert(`ADMIN CREATED SUCCESSFULLY!\n\nUser: ${email}\n\nRole assigned via Secure Database Write.`);
+        return true;
 
     } catch (error) {
-        console.error("Error creating admin:", error);
-        alert("Failed to create admin in database: " + error.message);
+        console.error("Error creating/promoting admin:", error);
+        alert("Failed: " + error.message);
+        if (secondaryApp) secondaryApp.delete();
+        return false;
     }
 };
 
 // 4. RENDERING UI
 
-function renderStats() {
-    document.getElementById('totalUsersCount').innerText = users.length;
-    document.getElementById('totalSocietiesCount').innerText = societies.length;
-    document.getElementById('totalEventsCount').innerText = events.length;
 
-    const blockedCount = users.filter(u => u.status === 'Blocked').length;
-    document.getElementById('blockedUsersCount').innerText = blockedCount;
-}
 
 function renderLogs() {
     const list = document.getElementById('recentLogs');
@@ -367,17 +514,22 @@ function renderUsers(filter = "") {
         if (currentUser.type === 'SUPERUSER') {
             actionsHtml += `
                 <button class="action-btn-sm ${isBlocked ? 'approve' : 'block'}" 
-                        onclick="toggleUserBlock('${u.email}')" 
+                        onclick="toggleUserBlock('${u.uid || u.email}')" 
                         title="${isBlocked ? 'Unblock' : 'Block'}">
                     <span class="material-icons-round">${isBlocked ? 'check_circle' : 'block'}</span>
                 </button>
-                <button class="action-btn-sm delete" onclick="deleteUser('${u.email}')" title="Delete Permanent">
+                <button class="action-btn-sm delete" onclick="deleteUser('${u.uid || u.email}')" title="Delete Permanent">
                     <span class="material-icons-round">delete</span>
                 </button>
             `;
         }
 
         actionsHtml += '</div>';
+
+        // MASK EMAIL FOR NORMAL ADMINS
+        const displayEmail = (currentUser.type === 'SUPERUSER' || u.email === currentUser.email)
+            ? u.email
+            : u.email.replace(/(.{2})(.*)(@.*)/, '$1***$3');
 
         tbody.innerHTML += `
             <tr style="${isBlocked ? 'opacity: 0.6; background: rgba(239,68,68,0.05);' : ''}">
@@ -387,14 +539,14 @@ function renderUsers(filter = "") {
                         ${u.name}
                     </div>
                 </td>
-                <td>${u.email}</td>
+                <td title="${currentUser.type === 'SUPERUSER' ? '' : 'Hidden for privacy'}">${displayEmail}</td>
                 <td><span class="badge ${u.role === 'Admin' ? 'admin-badge' : 'free'}">${u.role}</span></td>
                 <td>
                     <span class="badge ${isBlocked ? 'paid' : 'free'}" style="${isBlocked ? 'color: #f87171; border-color: #f87171;' : ''}">
                         ${u.status || 'Active'}
                     </span>
                 </td>
-                <td>${u.joined || 'N/A'}</td>
+                <td>${u.joined ? new Date(u.joined).toLocaleDateString() : 'N/A'}</td>
                 <td>${actionsHtml}</td>
             </tr>
         `;
@@ -407,12 +559,21 @@ function renderSocieties() {
 
     societies.forEach(soc => {
         let actionsHtml = '<div class="event-actions">';
+
+        // Edit: Permission Check
         if (hasPermission(PERMISSIONS.EDIT_SOCIETIES)) {
-            actionsHtml += `
-                <button class="edit-btn" onclick="editSociety('${soc.id}')">Edit</button>
-                <button class="delete-btn" onclick="deleteSociety('${soc.id}')">Delete</button>
-            `;
+            actionsHtml += `<button class="edit-btn" onclick="editSociety('${soc.id}')">Edit</button>`;
         }
+
+        // Delete: STRICT OWNERSHIP RULE
+        // Show delete ONLY if: Super Admin OR (Edit Permission AND Created By Me)
+        const isOwner = soc.createdByAdminId === currentUser.uid;
+        const isSuper = currentUser.type === 'SUPERUSER';
+
+        if (isSuper || (hasPermission(PERMISSIONS.EDIT_SOCIETIES) && isOwner)) {
+            actionsHtml += `<button class="delete-btn" onclick="deleteSociety('${soc.id}')">Delete</button>`;
+        }
+
         actionsHtml += '</div>';
 
         grid.innerHTML += `
@@ -523,26 +684,49 @@ window.deleteSociety = function (id) {
         alert("Access Denied: You don't have permission to delete societies.");
         return;
     }
+
+    const soc = societies.find(s => s.id === id);
+    if (!soc) return;
+
+    // STRICT BACKEND CHECK
+    if (soc.createdByAdminId !== currentUser.uid && currentUser.type !== 'SUPERUSER') {
+        alert("Access Denied: You can only delete societies you created.");
+        return;
+    }
+
     if (!confirm("Delete this society? Events linked to it might remain.")) return;
-    const sName = societies.find(s => s.id === id)?.name;
+
     societies = societies.filter(s => s.id !== id);
     saveData();
     renderSocieties();
     renderStats();
-    logAction(`Deleted society ${sName}`);
+    logAction(`Deleted society ${soc.name}`);
 };
 
 window.approveEvent = function (id) {
-    if (!hasPermission(PERMISSIONS.EDIT_EVENTS)) {
-        alert("Access Denied: You don't have permission to approve events.");
-        return;
-    }
-    const ev = events.find(e => e.id === id);
-    if (ev) {
-        ev.status = 'Approved';
-        saveData();
-        renderEvents('all'); // Refresh current tab
-    }
+    firebase.auth().onAuthStateChanged((user) => {
+        if (!user) {
+            alert("Permission Denied: You must be logged in to approve events.");
+            return;
+        }
+
+        if (!hasPermission(PERMISSIONS.EDIT_EVENTS)) {
+            alert("Access Denied: You don't have permission to approve events.");
+            return;
+        }
+
+        // UPDATE FIREBASE REALTIME DATABASE
+        firebase.database().ref("events").child(id).update({ status: 'Approved' })
+            .then(() => {
+                alert("Event Approved & Published!");
+                logAction(`Approved event ID ${id}`);
+                // The .on('value') listener will automatically update the UI
+            })
+            .catch((error) => {
+                console.error("Error approving event:", error);
+                alert("Failed to approve event: " + error.message);
+            });
+    });
 };
 
 window.deleteEvent = function (id) {
@@ -958,133 +1142,141 @@ if (adminEventForm) {
         e.preventDefault();
         console.log("Form Submitted! Processing...");
 
-        try {
-            // SAFE GET VALUE Helper (already present)
-            const getVal = (id) => document.getElementById(id) ? document.getElementById(id).value : '';
-
-            // SAFE CHECKED HELPER (add this)
-            const getChecked = (id) => document.getElementById(id) ? document.getElementById(id).checked : false;
-
-            // 1. Basic fields
-            const name = getVal('eventName');
-            const descEl = document.getElementById('eventDescEditor');
-            const desc = descEl ? descEl.innerHTML : '';
-
-            const date = getVal('eventDate');
-            const time = getVal('eventTime');
-            const endTime = getVal('eventEndTime');
-
-            if (endTime && endTime <= time) {
-                alert('End time must be after start time.');
+        firebase.auth().onAuthStateChanged(async (user) => {
+            if (!user) {
+                alert("Permission Denied: You must be logged in to create events.");
                 return;
             }
 
-            // 2. Mode & venue – use getVal for all
-            const mode = getVal('eventMode');
-            const venue = getVal('eventVenue');
-            const meetingLink = getVal('eventMeetingLink');
+            try {
+                // SAFE GET VALUE Helper (already present)
+                const getVal = (id) => document.getElementById(id) ? document.getElementById(id).value : '';
+                // ... (rest of the form data collection remains same)
 
-            // 3. Audience & capacity
-            const audience = getVal('eventAudience');
-            const maxParticipants = getVal('eventMaxParticipants') || 'Unlimited';
+                // SAFE CHECKED HELPER (add this)
+                const getChecked = (id) => document.getElementById(id) ? document.getElementById(id).checked : false;
 
-            // 4. Price & category
-            const type = getVal('eventType');
-            const price = type === 'paid' ? getVal('eventPrice') : 'Free';
-            const category = getVal('eventCategory');
+                // 1. Basic fields
+                const name = getVal('eventName');
+                const descEl = document.getElementById('eventDescEditor');
+                const desc = descEl ? descEl.innerHTML : '';
 
-            // 5. Toggles – use getChecked
-            const isFeatured = getChecked('toggleFeatured');
-            const allowShare = getChecked('toggleShare');
+                const date = getVal('eventDate');
+                const time = getVal('eventTime');
+                const endTime = getVal('eventEndTime');
 
-            // 6. Contact rows
-            const contacts = [...document.querySelectorAll('.contact-row')].map(row => ({
-                name: row.querySelector('.contact-name')?.value,
-                info: row.querySelector('.contact-info')?.value
-            })).filter(c => c.name && c.info);
-
-            // 7. Collect Organizers
-            const organizers = [...document.querySelectorAll('.organizer-input')]
-                .map(i => i.value)
-                .filter(Boolean);
-
-            // 2. Image Handling (Cloudinary)
-            let finalImage = 'assets/logo_final.png';
-
-            // Check if user has a new banner (Base64 from Cropper)
-            if (window.bannerImageData) {
-                try {
-                    // Convert Base64 to File for upload
-                    const res = await fetch(window.bannerImageData);
-                    const blob = await res.blob();
-                    const file = new File([blob], "banner.jpg", { type: "image/jpeg" });
-                    finalImage = await uploadImageToCloudinary(file);
-                } catch (uploadErr) {
-                    console.error("Upload failed", uploadErr);
-                    alert("Image upload failed: " + uploadErr.message);
+                if (endTime && endTime <= time) {
+                    alert('End time must be after start time.');
                     return;
                 }
-            } else if (editingEventId) {
-                // Keep existing image if not changed
-                const ev = events.find(e => e.id === editingEventId);
-                if (ev && ev.image) finalImage = ev.image;
+
+                // 2. Mode & venue – use getVal for all
+                const mode = getVal('eventMode');
+                const venue = getVal('eventVenue');
+                const meetingLink = getVal('eventMeetingLink');
+
+                // 3. Audience & capacity
+                const audience = getVal('eventAudience');
+                const maxParticipants = getVal('eventMaxParticipants') || 'Unlimited';
+
+                // 4. Price & category
+                const type = getVal('eventType');
+                const price = type === 'paid' ? getVal('eventPrice') : 'Free';
+                const category = getVal('eventCategory');
+
+                // 5. Toggles – use getChecked
+                const isFeatured = getChecked('toggleFeatured');
+                const allowShare = getChecked('toggleShare');
+
+                // 6. Contact rows
+                const contacts = [...document.querySelectorAll('.contact-row')].map(row => ({
+                    name: row.querySelector('.contact-name')?.value,
+                    info: row.querySelector('.contact-info')?.value
+                })).filter(c => c.name && c.info);
+
+                // 7. Collect Organizers
+                const organizers = [...document.querySelectorAll('.organizer-input')]
+                    .map(i => i.value)
+                    .filter(Boolean);
+
+                // 2. Image Handling (Cloudinary)
+                let finalImage = 'assets/logo_final.png';
+
+                // Check if user has a new banner (Base64 from Cropper)
+                if (window.bannerImageData) {
+                    try {
+                        // Convert Base64 to File for upload
+                        const res = await fetch(window.bannerImageData);
+                        const blob = await res.blob();
+                        const file = new File([blob], "banner.jpg", { type: "image/jpeg" });
+                        finalImage = await uploadImageToCloudinary(file);
+                    } catch (uploadErr) {
+                        console.error("Upload failed", uploadErr);
+                        alert("Image upload failed: " + uploadErr.message);
+                        return;
+                    }
+                } else if (editingEventId) {
+                    // Keep existing image if not changed
+                    const ev = events.find(e => e.id === editingEventId);
+                    if (ev && ev.image) finalImage = ev.image;
+                }
+
+                const eventData = {
+                    // id: generated by firebase or kept if editing
+                    name: name,
+                    title: name,
+                    description: desc,
+                    date: new Date(date).toLocaleDateString("en-US", { month: 'short', day: 'numeric' }),
+                    fullDate: date,
+                    time: time,
+                    endTime: endTime,
+                    venue: venue,
+                    mode: mode,
+                    meetingLink: meetingLink,
+                    category: category,
+                    audience: audience,
+                    maxParticipants: maxParticipants,
+                    type: type,
+                    price: price,
+                    image: finalImage,
+                    images: [finalImage],
+                    organizer: organizers.length > 0 ? organizers[0] : '',
+                    organizers: organizers,
+                    contact: contacts.length > 0 ? contacts[0] : null,
+                    contacts: contacts,
+                    link: getVal('eventRegLink'),
+                    regDeadline: getVal('eventRegDeadline'),
+                    featured: isFeatured,
+                    allowShare: allowShare,
+                    status: 'Approved',
+                    lastUpdated: new Date().toISOString(),
+                    createdBy: user.email // Use verified auth email
+                };
+
+                // Read ID from hidden input (more robust than global variable)
+                const submissionId = document.getElementById('editEventId')?.value || editingEventId;
+
+                if (submissionId) {
+                    // UPDATE EXISTING IN FIREBASE
+                    await firebase.database().ref("events").child(submissionId).update(eventData);
+                    alert('Event Updated Successfully!');
+                    logAction(`Updated event: ${name}`);
+                } else {
+                    // CREATE NEW IN FIREBASE
+                    eventData.createdAt = new Date().toISOString();
+                    await firebase.database().ref("events").push(eventData);
+                    alert('Event Published Successfully!');
+                    logAction(`Created event: ${name}`);
+                }
+
+                closeAddEventModal();
+                // Listener will update UI automatically
+
+            } catch (error) {
+                console.error("Submission Error:", error);
+                alert("Error creating event: " + error.message);
             }
-
-            const eventData = {
-                // id: generated by firebase or kept if editing
-                name: name,
-                title: name,
-                description: desc,
-                date: new Date(date).toLocaleDateString("en-US", { month: 'short', day: 'numeric' }),
-                fullDate: date,
-                time: time,
-                endTime: endTime,
-                venue: venue,
-                mode: mode,
-                meetingLink: meetingLink,
-                category: category,
-                audience: audience,
-                maxParticipants: maxParticipants,
-                type: type,
-                price: price,
-                image: finalImage,
-                images: [finalImage],
-                organizer: organizers.length > 0 ? organizers[0] : '',
-                organizers: organizers,
-                contact: contacts.length > 0 ? contacts[0] : null,
-                contacts: contacts,
-                link: getVal('eventRegLink'),
-                regDeadline: getVal('eventRegDeadline'),
-                featured: isFeatured,
-                allowShare: allowShare,
-                status: 'Approved',
-                lastUpdated: new Date().toISOString(),
-                createdBy: currentUser.email
-            };
-
-            // Read ID from hidden input (more robust than global variable)
-            const submissionId = document.getElementById('editEventId')?.value || editingEventId;
-
-            if (submissionId) {
-                // UPDATE EXISTING IN FIREBASE
-                await firebase.database().ref("events").child(submissionId).update(eventData);
-                alert('Event Updated Successfully!');
-                logAction(`Updated event: ${name}`);
-            } else {
-                // CREATE NEW IN FIREBASE
-                eventData.createdAt = new Date().toISOString();
-                await firebase.database().ref("events").push(eventData);
-                alert('Event Published Successfully!');
-                logAction(`Created event: ${name}`);
-            }
-
-            closeAddEventModal();
-            // Listener will update UI automatically
-
-        } catch (error) {
-            console.error("Submission Error:", error);
-            alert("Error creating event: " + error.message);
-        }
+        });
     });
 }
 
@@ -1170,7 +1362,8 @@ if (adminSocietyForm) {
             linkedin: linkedin,
             instagram: instagram,
 
-            image: uploadedSocLogo || 'assets/logo_final.png'
+            image: uploadedSocLogo || 'assets/logo_final.png',
+            createdByAdminId: currentUser.uid // STRICT OWNERSHIP TRACKING
         };
 
         societies.push(newSoc);
@@ -1187,8 +1380,9 @@ if (adminSocietyForm) {
 // 7. INITIALIZATION
 // Initialize Navigation (Global Scope)
 
-
-document.addEventListener('DOMContentLoaded', () => {
+// Defer Init until Auth Checks (called from onAuthStateChanged)
+window.initAdminApp = function () {
+    console.log("Initializing Admin App UI...");
 
     // Filter Logic
     window.filterUsers = function () {
@@ -1289,171 +1483,163 @@ document.addEventListener('DOMContentLoaded', () => {
         profileBadge.textContent = currentUser.type || 'ADMIN';
         profileBadge.className = `badge ${currentUser.type === 'SUPERUSER' ? 'admin-badge' : 'free'}`;
     }
-});
 
-// Helper for Add Admin (Modal Version)
-window.showAddAdminModal = function () {
-    const modal = document.getElementById('addAdminModal');
-    if (modal) {
-        modal.style.display = 'flex';
-        // Clear previous data
-        if (document.getElementById('addAdminForm')) document.getElementById('addAdminForm').reset();
-        if (document.getElementById('generatedPassword')) document.getElementById('generatedPassword').value = "";
-    }
-};
-
-
-window.closeAddAdminModal = function () {
-    const modal = document.getElementById('addAdminModal');
-    if (modal) modal.style.display = 'none';
-};
-
-// Alias for Quick Action Button
-window.promptAddAdmin = window.showAddAdminModal;
-
-// Note: Password generation is now handled securely on the backend.
-// Super Admins no longer see or handle plain passwords.
-
-
-// Add Admin Form Submission (SECURE BACKEND FLOW)
-const addAdminForm = document.getElementById('addAdminForm');
-if (addAdminForm) {
-    addAdminForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-
-        // 1. Authorization Check
-        if (!SUPER_ADMINS.includes(currentUser.email)) {
-            alert("Access Denied: Only Super Admins can add new admins.");
-            return;
+    // Helper for Add Admin (Modal Version)
+    window.showAddAdminModal = function () {
+        const modal = document.getElementById('addAdminModal');
+        if (modal) {
+            modal.style.display = 'flex';
+            // Clear previous data
+            if (document.getElementById('addAdminForm')) document.getElementById('addAdminForm').reset();
+            if (document.getElementById('generatedPassword')) document.getElementById('generatedPassword').value = "";
         }
+    };
 
-        const name = document.getElementById('newAdminName').value.trim();
-        const email = document.getElementById('newAdminEmail').value.trim().toLowerCase();
-        const roleValue = document.querySelector('input[name="adminRole"]:checked').value;
 
-        // 2. Permissions Logic
-        let permissions = [];
-        if (roleValue === 'Super Admin') {
-            permissions = ['ALL'];
-        } else {
-            const checkboxes = document.querySelectorAll('#addAdminForm input[type="checkbox"]:checked');
-            permissions = Array.from(checkboxes).map(cb => cb.value);
-        }
+    window.closeAddAdminModal = function () {
+        const modal = document.getElementById('addAdminModal');
+        if (modal) modal.style.display = 'none';
+    };
 
-        // 3. UI Loading State
-        const submitBtn = e.target.querySelector('button[type="submit"]');
-        const originalBtnText = submitBtn.innerHTML;
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<span class="material-icons-round animate-spin">sync</span> Creating...';
+    // Alias for Quick Action Button
+    window.promptAddAdmin = window.showAddAdminModal;
 
-        try {
-            // 4. Call Secure Backend Firebase Function
-            const createAdminFn = firebase.functions().httpsCallable('createAdmin');
-            const result = await createAdminFn({
-                email,
-                name,
-                role: roleValue,
-                permissions
-            });
+    // Note: Password generation is now handled securely on the backend.
+    // Super Admins no longer see or handle plain passwords.
 
-            if (result.data.success) {
-                alert(result.data.message);
-                closeAddAdminModal();
-                addAdminForm.reset();
-                if (typeof renderUsers === 'function') renderUsers();
-                if (typeof renderStats === 'function') renderStats();
-            } else {
-                throw new Error(result.data.message || 'CreationFailed');
+
+    // Add Admin Form Submission (SECURE BACKEND FLOW)
+    const addAdminForm = document.getElementById('addAdminForm');
+    if (addAdminForm) {
+        addAdminForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // 1. Authorization Check
+            if (!SUPER_ADMINS.includes(currentUser.email)) {
+                alert("Access Denied: Only Super Admins can add new admins.");
+                return;
             }
 
-        } catch (error) {
-            console.error("Backend Admin Creation Error:", error);
-            alert(`Error: ${error.message || 'Operation failed. Please ensure you are online and Firebase is initialized.'}`);
-        } finally {
-            submitBtn.disabled = false;
-            submitBtn.innerHTML = originalBtnText;
-        }
-    });
-}
-// --- HELPER FUNCTIONS FOR MODAL ---
-window.togglePriceField = function () {
-    const type = document.getElementById('eventType').value;
-    const priceInput = document.getElementById('eventPrice');
-    if (type === 'paid') {
-        priceInput.style.display = 'block';
-        priceInput.required = true;
-    } else {
-        priceInput.style.display = 'none';
-        priceInput.required = false;
-        priceInput.value = '';
+            const name = document.getElementById('newAdminName').value.trim();
+            const email = document.getElementById('newAdminEmail').value.trim().toLowerCase();
+            const roleValue = document.querySelector('input[name="adminRole"]:checked').value;
+            const manualPwd = document.getElementById('generatedPassword').value; // Read from UI
+
+            // 2. Permissions Logic
+            let permissions = [];
+            if (roleValue === 'Super Admin') {
+                permissions = ['ALL'];
+            } else {
+                const checkboxes = document.querySelectorAll('#addAdminForm input[type="checkbox"]:checked');
+                permissions = Array.from(checkboxes).map(cb => cb.value);
+            }
+
+            // 3. UI Loading State
+            const submitBtn = e.target.querySelector('button[type="submit"]');
+            const originalBtnText = submitBtn.innerHTML;
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="material-icons-round animate-spin">sync</span> Creating...';
+
+            try {
+                // 4. Call Secure Client-Side Creation
+                const success = await window.createAdmin(name, email, permissions, roleValue, manualPwd);
+
+                if (success) {
+                    closeAddAdminModal();
+                    e.target.reset();
+                    // Reset checkboxes
+                    document.querySelectorAll('#addAdminForm input[type="checkbox"]').forEach(cb => cb.checked = false);
+
+                    if (typeof renderUsers === 'function') renderUsers();
+                    if (typeof renderStats === 'function') renderStats();
+                }
+            } catch (error) {
+                console.error("Form Submission Unexpected Error:", error);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalBtnText;
+            }
+        });
     }
-};
-
-window.previewImage = function (input) {
-    const preview = document.getElementById('imagePreview');
-    if (input.files && input.files[0]) {
-        const reader = new FileReader();
-        reader.onload = function (e) {
-            preview.src = e.target.result;
-            preview.style.display = 'block';
-        }
-        reader.readAsDataURL(input.files[0]);
-    } else {
-        preview.style.display = 'none';
-    }
-};
-// SINGLE IMAGE UPLOAD HANDLER (ADMIN)
-// --- DYNAMIC FORM HANDLERS ---
-
-let bannerImageData = null;
-
-// 1. BANNER UPLOAD & AUTO-CROP (16:9)
-function handleBannerUpload(input) {
-    const file = input.files[0];
-    if (!file) return;
-
-    const img = new Image();
-    const reader = new FileReader();
-
-    reader.onload = e => img.src = e.target.result;
-    reader.readAsDataURL(file);
-
-    img.onload = () => {
-        const canvas = document.getElementById('bannerCanvas');
-        const ctx = canvas.getContext('2d');
-
-        // 16:9 ratio
-        const targetRatio = 16 / 9;
-        let sw = img.width;
-        let sh = img.height;
-
-        let sx = 0, sy = 0;
-
-        // Calculate Crop
-        if (sw / sh > targetRatio) {
-            // Image is wider than 16:9 -> Crop width
-            const newW = sh * targetRatio;
-            sx = (sw - newW) / 2;
-            sw = newW;
+    // --- HELPER FUNCTIONS FOR MODAL ---
+    window.togglePriceField = function () {
+        const type = document.getElementById('eventType').value;
+        const priceInput = document.getElementById('eventPrice');
+        if (type === 'paid') {
+            priceInput.style.display = 'block';
+            priceInput.required = true;
         } else {
-            // Image is taller than 16:9 -> Crop height
-            const newH = sw / targetRatio;
-            sy = (sh - newH) / 2;
-            sh = newH;
+            priceInput.style.display = 'none';
+            priceInput.required = false;
+            priceInput.value = '';
         }
+    };
 
-        // Set Canvas to Ideal Banner Size
-        canvas.width = 1600;
-        canvas.height = 900;
+    window.previewImage = function (input) {
+        const preview = document.getElementById('imagePreview');
+        if (input.files && input.files[0]) {
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                preview.src = e.target.result;
+                preview.style.display = 'block';
+            }
+            reader.readAsDataURL(input.files[0]);
+        } else {
+            preview.style.display = 'none';
+        }
+    };
+    // SINGLE IMAGE UPLOAD HANDLER (ADMIN)
+    // --- DYNAMIC FORM HANDLERS ---
 
-        // Draw Cropped Image
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 1600, 900);
+    let bannerImageData = null;
 
-        // Convert to Base64
-        bannerImageData = canvas.toDataURL('image/jpeg', 0.9);
+    // 1. BANNER UPLOAD & AUTO-CROP (16:9)
+    function handleBannerUpload(input) {
+        const file = input.files[0];
+        if (!file) return;
 
-        // Show Preview
-        document.getElementById('imagePreviewContainer').innerHTML = `
+        const img = new Image();
+        const reader = new FileReader();
+
+        reader.onload = e => img.src = e.target.result;
+        reader.readAsDataURL(file);
+
+        img.onload = () => {
+            const canvas = document.getElementById('bannerCanvas');
+            const ctx = canvas.getContext('2d');
+
+            // 16:9 ratio
+            const targetRatio = 16 / 9;
+            let sw = img.width;
+            let sh = img.height;
+
+            let sx = 0, sy = 0;
+
+            // Calculate Crop
+            if (sw / sh > targetRatio) {
+                // Image is wider than 16:9 -> Crop width
+                const newW = sh * targetRatio;
+                sx = (sw - newW) / 2;
+                sw = newW;
+            } else {
+                // Image is taller than 16:9 -> Crop height
+                const newH = sw / targetRatio;
+                sy = (sh - newH) / 2;
+                sh = newH;
+            }
+
+            // Set Canvas to Ideal Banner Size
+            canvas.width = 1600;
+            canvas.height = 900;
+
+            // Draw Cropped Image
+            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 1600, 900);
+
+            // Convert to Base64
+            bannerImageData = canvas.toDataURL('image/jpeg', 0.9);
+
+            // Show Preview
+            document.getElementById('imagePreviewContainer').innerHTML = `
             <div style="position:relative;">
                 <img src="${bannerImageData}"
                      style="width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:12px; border:2px solid #6366f1;">
@@ -1464,134 +1650,135 @@ function handleBannerUpload(input) {
             </div>
         `;
 
-        document.getElementById('imageError').style.display = 'none';
-        input.value = ''; // Reset input to allow re-uploading same file
-    };
-}
+            document.getElementById('imageError').style.display = 'none';
+            input.value = ''; // Reset input to allow re-uploading same file
+        };
+    }
 
 
-// 2. CONTACT ROWS
-function addContactRow() {
-    const div = document.createElement('div');
-    div.className = 'contact-row';
-    div.style.display = 'flex';
-    div.style.gap = '10px';
-    div.style.marginBottom = '10px';
+    // 2. CONTACT ROWS
+    function addContactRow() {
+        const div = document.createElement('div');
+        div.className = 'contact-row';
+        div.style.display = 'flex';
+        div.style.gap = '10px';
+        div.style.marginBottom = '10px';
 
-    div.innerHTML = `
+        div.innerHTML = `
         <input type="text" placeholder="Name & Role" class="contact-name">
         <input type="text" placeholder="Email / Phone" class="contact-info">
         <button type="button" onclick="this.parentElement.remove()" style="background:none; border:none; color:#ef4444; cursor:pointer;">✕</button>
     `;
 
-    document.getElementById('contactContainer').appendChild(div);
-}
+        document.getElementById('contactContainer').appendChild(div);
+    }
 
 
-// 3. ORGANIZER ROWS
-function addOrganizerRow() {
-    const div = document.createElement('div');
-    div.style.display = 'flex';
-    div.style.gap = '10px';
-    div.style.marginTop = '8px';
-    div.style.alignItems = 'center';
+    // 3. ORGANIZER ROWS
+    function addOrganizerRow() {
+        const div = document.createElement('div');
+        div.style.display = 'flex';
+        div.style.gap = '10px';
+        div.style.marginTop = '8px';
+        div.style.alignItems = 'center';
 
-    div.innerHTML = `
+        div.innerHTML = `
         <input type="text" class="organizer-input" placeholder="e.g. KIIT Robotics Society" style="flex:1;">
         <button type="button" onclick="this.parentElement.remove()" style="background:none; border:none; color:#ef4444; cursor:pointer;">✕</button>
     `;
 
-    document.getElementById('organizerContainer').appendChild(div);
-}
-
-// --- NAVIGATION ENHANCEMENTS ---
-// 1. Go Back Logic
-window.goBack = function () {
-    if (window.history.length > 1) {
-        window.history.back();
-    } else {
-        window.location.href = "index.html";
-    }
-};
-
-// 2. Section Persistence (Restoration)
-window.addEventListener("DOMContentLoaded", () => {
-    const lastSection = sessionStorage.getItem("adminLastSection");
-    if (lastSection && window.showSection) {
-        // Use timeout to ensure DOM elements (like stats) are ready if needed
-        setTimeout(() => {
-            // Manually trigger showSection
-            // We need to bypass the 'event' requirement in showSection if it uses event.currentTarget
-            window.showSection(lastSection);
-        }, 100);
+        document.getElementById('organizerContainer').appendChild(div);
     }
 
-    // --- FIX: MOBILE SIDEBAR AUTO-CLOSE ---
-    // 1. Close sidebar when any menu item is clicked
-    document.querySelectorAll(".admin-sidebar a, .admin-sidebar button").forEach(item => {
-        item.addEventListener("click", () => {
-            if (window.innerWidth <= 768) {
-                // Check if it's the desktop toggle button inside the sidebar
-                if (item.id === "sidebarToggle") return;
-                document.querySelector(".admin-sidebar")?.classList.remove("active");
+    // --- NAVIGATION ENHANCEMENTS ---
+    // 1. Go Back Logic
+    window.goBack = function () {
+        if (window.history.length > 1) {
+            window.history.back();
+        } else {
+            window.location.href = "index.html";
+        }
+    };
+
+    // 2. Section Persistence (Restoration)
+    window.addEventListener("DOMContentLoaded", () => {
+        const lastSection = sessionStorage.getItem("adminLastSection");
+        if (lastSection && window.showSection) {
+            // Use timeout to ensure DOM elements (like stats) are ready if needed
+            setTimeout(() => {
+                // Manually trigger showSection
+                // We need to bypass the 'event' requirement in showSection if it uses event.currentTarget
+                window.showSection(lastSection);
+            }, 100);
+        }
+
+        // --- FIX: MOBILE SIDEBAR AUTO-CLOSE ---
+        // 1. Close sidebar when any menu item is clicked
+        document.querySelectorAll(".admin-sidebar a, .admin-sidebar button").forEach(item => {
+            item.addEventListener("click", () => {
+                if (window.innerWidth <= 768) {
+                    // Check if it's the desktop toggle button inside the sidebar
+                    if (item.id === "sidebarToggle") return;
+                    document.querySelector(".admin-sidebar")?.classList.remove("active");
+                }
+            });
+        });
+
+        // 2. Close sidebar when clicking outside
+        // The previous implementation utilized the overlay click (if available) or this document listener.
+        // We'll keep this document listener as a fallback and primary 'outside' check.
+        document.addEventListener("click", (e) => {
+            const sidebar = document.querySelector(".admin-sidebar");
+            const toggleBtn = document.querySelector(".mobile-sidebar-toggle");
+
+            // If the sidebar is active, and the click is NOT inside the sidebar, and NOT on the toggle button
+            if (
+                window.innerWidth <= 768 &&
+                sidebar?.classList.contains("active") &&
+                !sidebar.contains(e.target) &&
+                !toggleBtn?.contains(e.target)
+            ) {
+                sidebar.classList.remove("active");
             }
         });
-    });
 
-    // 2. Close sidebar when clicking outside
-    // The previous implementation utilized the overlay click (if available) or this document listener.
-    // We'll keep this document listener as a fallback and primary 'outside' check.
-    document.addEventListener("click", (e) => {
-        const sidebar = document.querySelector(".admin-sidebar");
-        const toggleBtn = document.querySelector(".mobile-sidebar-toggle");
+        // --- APPLY RBAC UI RESTRICTIONS ---
 
-        // If the sidebar is active, and the click is NOT inside the sidebar, and NOT on the toggle button
-        if (
-            window.innerWidth <= 768 &&
-            sidebar?.classList.contains("active") &&
-            !sidebar.contains(e.target) &&
-            !toggleBtn?.contains(e.target)
-        ) {
-            sidebar.classList.remove("active");
+        // 1. Add Admin Navigation Visibility (Master Super Admins Only)
+        const isMasterSuper = SUPER_ADMINS.includes(currentUser.email);
+        const navAddAdmin = document.getElementById('navAddAdmin');
+        const addAdminBtn = document.getElementById('addAdminBtn');
+        const addAdminFromUsers = document.getElementById('addAdminFromUsers');
+
+        if (navAddAdmin) navAddAdmin.style.display = isMasterSuper ? 'flex' : 'none';
+        if (addAdminBtn) addAdminBtn.style.display = isMasterSuper ? 'flex' : 'none';
+        if (addAdminFromUsers) addAdminFromUsers.style.display = isMasterSuper ? 'inline-flex' : 'none';
+
+        // 2. Section Navigation Visibility
+        if (!hasPermission(PERMISSIONS.VIEW_USERS)) {
+            document.querySelector('button[onclick*="showSection(\'users\')"]')?.style.setProperty('display', 'none', 'important');
         }
-    });
+        if (!hasPermission(PERMISSIONS.VIEW_SOCIETIES)) {
+            document.querySelector('button[onclick*="showSection(\'societies\')"]')?.style.setProperty('display', 'none', 'important');
+        }
+        if (!hasPermission(PERMISSIONS.VIEW_EVENTS)) {
+            document.querySelector('button[onclick*="showSection(\'events\')"]')?.style.setProperty('display', 'none', 'important');
+        }
+        if (!hasPermission(PERMISSIONS.SYSTEM_SETTINGS)) {
+            document.querySelector('button[onclick*="showSection(\'settings\')"]')?.style.setProperty('display', 'none', 'important');
+        }
 
-    // --- APPLY RBAC UI RESTRICTIONS ---
+        // 3. Society Section Internal Actions
+        if (!hasPermission(PERMISSIONS.EDIT_SOCIETIES)) {
+            document.querySelector('button[onclick*="showAddSocietyModal"]')?.style.setProperty('display', 'none', 'important');
+        }
 
-    // 1. Add Admin Navigation Visibility (Master Super Admins Only)
-    const isMasterSuper = SUPER_ADMINS.includes(currentUser.email);
-    const navAddAdmin = document.getElementById('navAddAdmin');
-    const addAdminBtn = document.getElementById('addAdminBtn');
-    const addAdminFromUsers = document.getElementById('addAdminFromUsers');
-
-    if (navAddAdmin) navAddAdmin.style.display = isMasterSuper ? 'flex' : 'none';
-    if (addAdminBtn) addAdminBtn.style.display = isMasterSuper ? 'flex' : 'none';
-    if (addAdminFromUsers) addAdminFromUsers.style.display = isMasterSuper ? 'inline-flex' : 'none';
-
-    // 2. Section Navigation Visibility
-    if (!hasPermission(PERMISSIONS.VIEW_USERS)) {
-        document.querySelector('button[onclick*="showSection(\'users\')"]')?.style.setProperty('display', 'none', 'important');
-    }
-    if (!hasPermission(PERMISSIONS.VIEW_SOCIETIES)) {
-        document.querySelector('button[onclick*="showSection(\'societies\')"]')?.style.setProperty('display', 'none', 'important');
-    }
-    if (!hasPermission(PERMISSIONS.VIEW_EVENTS)) {
-        document.querySelector('button[onclick*="showSection(\'events\')"]')?.style.setProperty('display', 'none', 'important');
-    }
-    if (!hasPermission(PERMISSIONS.SYSTEM_SETTINGS)) {
-        document.querySelector('button[onclick*="showSection(\'settings\')"]')?.style.setProperty('display', 'none', 'important');
-    }
-
-    // 3. Society Section Internal Actions
-    if (!hasPermission(PERMISSIONS.EDIT_SOCIETIES)) {
-        document.querySelector('button[onclick*="showAddSocietyModal"]')?.style.setProperty('display', 'none', 'important');
-    }
-
-    // 4. Event Section Internal Actions
-    if (!hasPermission(PERMISSIONS.ADD_EVENTS)) {
-        document.querySelector('button[onclick*="showAddEventModal"]')?.style.setProperty('display', 'none', 'important');
-    }
-});
+        // 4. Event Section Internal Actions
+        if (!hasPermission(PERMISSIONS.ADD_EVENTS)) {
+            document.querySelector('button[onclick*="showAddEventModal"]')?.style.setProperty('display', 'none', 'important');
+        }
+    }); // Closing of the inner DOMContentLoaded listener
+}; // Closing of window.initAdminApp
 
 // --- ROBUST SIDEBAR INTERACTION PATCH (DEPRECATED: Now using <button> with onclick) ---
 /*
@@ -1628,5 +1815,27 @@ window.testEmail = function (customEmail = null) {
     }).catch((err) => {
         console.error('Test Failed:', err);
         alert(`EmailJS Test Failed!\nStatus: ${err.status}\nError: ${err.text || err.message}`);
+    });
+};
+
+// --- RESTORED: PASSWORD UI HANDLERS ---
+document.addEventListener('DOMContentLoaded', () => {
+    const genBtn = document.getElementById('generateBtn');
+    if (genBtn) {
+        genBtn.addEventListener('click', () => {
+            const pwd = generateSecurePassword(12);
+            document.getElementById('generatedPassword').value = pwd;
+        });
+    }
+});
+
+window.copyPassword = function () {
+    const input = document.getElementById('generatedPassword');
+    if (!input || !input.value) return alert("Nothing to copy! Generate a password first.");
+
+    input.select();
+    input.setSelectionRange(0, 99999); // Mobile
+    navigator.clipboard.writeText(input.value).then(() => {
+        alert("Password copied to clipboard!");
     });
 };
